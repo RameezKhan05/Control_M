@@ -1,1 +1,28 @@
-
+Folder
+Job Name
+Type
+Command
+Days
+From
+Until
+In Conditions
+Out Conditions
+On OK Action
+On NotOK Action
+Shout Text
+Shout Destination
+Variables
+MyFolder
+MyJob
+Command
+/opt/do.sh
+ALL
+0800
+1700
+DB_READY ODAT
+JOB_DONE ODAT
+DO SHOUT=Success msg
+DO SHOUT=Failure msg;DO RERUN
+Failure msg
+ALERTS
+ENV=PROD;TYPE=CRON
