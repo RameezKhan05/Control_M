@@ -1,102 +1,71 @@
 import pandas as pd
 from lxml import etree
 
-df = pd.read_excel('jobs.xlsx', sheet_name='Jobs').fillna('')
-root = etree.Element('DEFINITION')
+# Load Excel
+df = pd.read_excel('controlm_jobs_full_tags.xlsx', engine='openpyxl').fillna('')
 
-def add_text_element(parent, tag, text):
-    if text:
-        el = etree.SubElement(parent, tag)
-        el.text = text
-        return el
-    return None
+# Create root
+root = etree.Element("DEFTABLE")
 
-for _, row in df.iterrows():
-    job = etree.SubElement(root, 'JOB')
-    def add_if(name, val): 
-        if val: job.set(name, str(val))
+# Group by folder
+for folder_name, group in df.groupby("Folder Name"):
+    folder_elem = etree.SubElement(root, "SMART_FOLDER", FOLDER_NAME=folder_name)
 
-    add_if('Folder', row['Folder'])
-    add_if('Name', row['Job Name'])
-    add_if('Type', row['Type'])
-    add_if('Application', row['Application'])
-    add_if('SubApplication', row['Sub‑Application'])
-    add_if('Description', row['Description'])
-    add_if('Host', row['Host'])
-    add_if('RunAs', row['Run As'])
-    add_if('MaxRerun', row['MaxRerun'])
-    add_if('Retries', row['Retries'])
+    for _, row in group.iterrows():
+        job_attribs = {k: str(v) for k, v in row.items() if k not in [
+            "Folder Name", "Variables", "SHOUT_WHEN", "SHOUT_TIME", "SHOUT_URGENCY", "SHOUT_DEST", 
+            "SHOUT_MESSAGE", "ON_NOTOK_DOSHOUT_MESSAGE", "ON_NOTOK_DOSHOUT_DEST", 
+            "INCOND_NAMES", "OUTCOND_NAMES", "QUANTITATIVE_NAMES", "RULE_BASED_CALENDARS"
+        ] and v != ''}
+        job_elem = etree.SubElement(folder_elem, "JOB", **job_attribs)
 
-    if row['Type'] == 'Command':
-        add_if('Command', row['Command'])
-    elif row['Type'] == 'Script':
-        add_if('FileName', row['FileName'])
-        add_if('ScriptPath', row['ScriptPath'])
-    elif row['Type'] == 'EmbeddedScript':
-        add_if('FileName', row['FileName'])
-        add_if('Script', row['ScriptContent'])
+        # Variables
+        for var in row["Variables"].split(";"):
+            if "=" in var:
+                name, value = var.split("=", 1)
+                etree.SubElement(job_elem, "VARIABLE", NAME=name.strip(), VALUE=value.strip())
 
-    # Schedule
-    sched = etree.SubElement(job, 'SCHED_TAB')
-    add_if_sched = lambda tag, val: sched.set(tag, val) if val else None
-    add_if_sched('Days', row['Days'])
-    if row['Cyclic']:
-        sched.set('Cyclic', str(row['Cyclic']))
-        if row['Interval']:
-            sched.set('Interval', str(row['Interval']))
-    time_elem = etree.SubElement(sched, 'Time')
-    if row['From']: time_elem.set('From', str(row['From']).zfill(4))
-    if row['Until']: time_elem.set('Until', str(row['Until']))
+        # SHOUTS
+        for when, time, urg, dst, msg in zip(
+            row["SHOUT_WHEN"].split(";"), row["SHOUT_TIME"].split(";"),
+            row["SHOUT_URGENCY"].split(";"), row["SHOUT_DEST"].split(";"),
+            row["SHOUT_MESSAGE"].split(";")
+        ):
+            if msg.strip():
+                etree.SubElement(job_elem, "SHOUT", WHEN=when.strip(), TIME=time.strip(),
+                                 URGENCY=urg.strip(), DEST=dst.strip(), MESSAGE=msg.strip())
 
-    # In Conditions
-    if row['In Conditions']:
-        inconds = etree.SubElement(job, 'INCOND')
-        for cond in str(row['In Conditions']).split(';'):
-            cond_name, _, odate = cond.partition(' ')
-            etree.SubElement(inconds, 'INCONDNAME', Name=cond_name.strip(), ODATE=odate.strip() or "ODAT")
+        # ON NOTOK → DOSHOUT
+        if row["ON_NOTOK_DOSHOUT_MESSAGE"] or row["ON_NOTOK_DOSHOUT_DEST"]:
+            on_elem = etree.SubElement(job_elem, "ON", STMT="*", CODE="NOTOK")
+            for msg, dst in zip(
+                row["ON_NOTOK_DOSHOUT_MESSAGE"].split(";"),
+                row["ON_NOTOK_DOSHOUT_DEST"].split(";")
+            ):
+                if msg.strip():
+                    etree.SubElement(on_elem, "DOSHOUT", URGENCY="V", MESSAGE=msg.strip(), DEST=dst.strip())
 
-    # Out Conditions
-    if row['Out Conditions']:
-        outconds = etree.SubElement(job, 'OUTCOND')
-        for cond in str(row['Out Conditions']).split(';'):
-            cond_name, _, odate = cond.partition(' ')
-            etree.SubElement(outconds, 'OUTCONDNAME', Name=cond_name.strip(), ODATE=odate.strip() or "ODAT", Sign='ADD')
+        # INCOND
+        for cond in row["INCOND_NAMES"].split(";"):
+            if cond.strip():
+                etree.SubElement(job_elem, "INCOND", NAME=cond.strip(), ODATE="ODAT")
 
-    # On OK Action
-    if row['On OK Action']:
-        onok = etree.SubElement(job, 'ON', STAT='OK')
-        for action in str(row['On OK Action']).split(';'):
-            if action.startswith("DO SHOUT="):
-                msg = action.split("=", 1)[1]
-                shout = etree.SubElement(onok, 'SHOUT')
-                shout.set('MESSAGE', msg)
-                if row['Shout Destination']:
-                    shout.set('DEST', row['Shout Destination'])
-            elif action.strip() == 'DO RERUN':
-                etree.SubElement(onok, 'RERUN')
+        # OUTCOND
+        for cond in row["OUTCOND_NAMES"].split(";"):
+            if cond.strip():
+                etree.SubElement(job_elem, "OUTCOND", NAME=cond.strip(), ODATE="ODAT", SIGN="+")
 
-    # On NotOK Action
-    if row['On NotOK Action']:
-        notok = etree.SubElement(job, 'ON', STAT='NOTOK')
-        for action in str(row['On NotOK Action']).split(';'):
-            if action.startswith("DO SHOUT="):
-                msg = action.split("=", 1)[1]
-                shout = etree.SubElement(notok, 'SHOUT')
-                shout.set('MESSAGE', msg)
-                if row['Shout Destination']:
-                    shout.set('DEST', row['Shout Destination'])
-            elif action.strip() == 'DO RERUN':
-                etree.SubElement(notok, 'RERUN')
+        # QUANTITATIVE
+        for quant in row["QUANTITATIVE_NAMES"].split(";"):
+            if quant.strip():
+                etree.SubElement(job_elem, "QUANTITATIVE", NAME=quant.strip(), QUANT="1", ONFAIL="R", ONOK="R")
 
-    # Variables
-    if row['Variables']:
-        vars_el = etree.SubElement(job, 'VARIABLES')
-        for var_pair in str(row['Variables']).split(';'):
-            if '=' in var_pair:
-                name, val = var_pair.split('=', 1)
-                etree.SubElement(vars_el, 'VARIABLE', NAME=name.strip(), VALUE=val.strip())
+        # RULE_BASED_CALENDARS
+        for cal in row["RULE_BASED_CALENDARS"].split(";"):
+            if cal.strip():
+                etree.SubElement(job_elem, "RULE_BASED_CALENDARS", NAME=cal.strip())
 
-# Save the XML
+# Write XML
 tree = etree.ElementTree(root)
-tree.write('jobs.xml', pretty_print=True, encoding='utf-8', xml_declaration=True)
-print("jobs.xml created successfully.")
+tree.write("converted_jobs.xml", encoding='utf-8', pretty_print=True, xml_declaration=True)
+print("converted_jobs.xml created successfully.")
