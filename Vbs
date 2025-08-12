@@ -68,14 +68,21 @@ Function CleanFileName(str)
 End Function
 
 Function BrowseForFile(title)
-    Dim objDialog
-    Set objDialog = CreateObject("UserAccounts.CommonDialog")
-    objDialog.Filter = "CSV Files|*.csv"
-    objDialog.FilterIndex = 1
-    objDialog.InitialDir = objFSO.GetAbsolutePathName(".")
-    objDialog.Flags = &H80000
-    objDialog.ShowOpen
-    BrowseForFile = objDialog.FileName
+    Dim objShell, objFile
+    Set objShell = CreateObject("Shell.Application")
+    Set objFile = objShell.BrowseForFolder(0, title & " (Select folder containing the file)", 0, 0)
+    If TypeName(objFile) = "Nothing" Then
+        BrowseForFile = ""
+    Else
+        ' Let user manually type file name after selecting folder
+        Dim fileName
+        fileName = InputBox("Enter the CSV file name (with extension) in folder: " & objFile.Self.Path)
+        If fileName = "" Then
+            BrowseForFile = ""
+        Else
+            BrowseForFile = objFile.Self.Path & "\" & fileName
+        End If
+    End If
 End Function
 
 Function BrowseForFolder(title)
