@@ -1,19 +1,17 @@
- Option Explicit
+Option Explicit
 
 Dim objExcel, objFSO, csvFile, saveFolder
 Dim objWorkbook, objWorksheet
 Dim lastRow, appCol, dict, cell, appName, key
 Dim tempWB, tempWS
 
-' Create objects
 Set objExcel = CreateObject("Excel.Application")
 Set objFSO = CreateObject("Scripting.FileSystemObject")
 Set dict = CreateObject("Scripting.Dictionary")
 
 objExcel.Visible = False
-appCol = 2 ' Column number for Application
+appCol = 2 ' Application column number
 
-' Ask for source CSV path
 csvFile = InputBox("Enter full path to CSV file:", "Source CSV")
 If csvFile = "" Then WScript.Quit
 If Not objFSO.FileExists(csvFile) Then
@@ -21,18 +19,14 @@ If Not objFSO.FileExists(csvFile) Then
     WScript.Quit
 End If
 
-' Ask for destination folder
 saveFolder = BrowseForFolder("Select folder to save output")
 If saveFolder = "" Then WScript.Quit
 
-' Open CSV
 Set objWorkbook = objExcel.Workbooks.Open(csvFile)
 Set objWorksheet = objWorkbook.Sheets(1)
 
-' Find last row in application column
-lastRow = objWorksheet.Cells(objWorksheet.Rows.Count, appCol).End(-4162).Row ' -4162 = xlUp
+lastRow = objWorksheet.Cells(objWorksheet.Rows.Count, appCol).End(-4162).Row
 
-' Get unique application names
 For Each cell In objWorksheet.Range(objWorksheet.Cells(2, appCol), objWorksheet.Cells(lastRow, appCol))
     appName = Trim(cell.Value)
     If Len(appName) > 0 Then
@@ -40,18 +34,14 @@ For Each cell In objWorksheet.Range(objWorksheet.Cells(2, appCol), objWorksheet.
     End If
 Next
 
-' Loop and save each application
 objExcel.ScreenUpdating = False
 For Each key In dict.Keys
     objWorksheet.UsedRange.AutoFilter Field:=appCol, Criteria1:=key
-    
     Set tempWB = objExcel.Workbooks.Add
     Set tempWS = tempWB.Sheets(1)
-    
-    objWorksheet.UsedRange.SpecialCells(12).Copy ' 12 = xlCellTypeVisible
-    tempWS.Range("A1").PasteSpecial -4163 ' -4163 = xlPasteValues
-    
-    tempWB.SaveAs saveFolder & "\" & CleanFileName(key) & ".csv", 6 ' 6 = xlCSV
+    objWorksheet.UsedRange.SpecialCells(12).Copy
+    tempWS.Range("A1").PasteSpecial -4163
+    tempWB.SaveAs saveFolder & "\" & CleanFileName(key) & ".csv", 6
     tempWB.Close False
 Next
 
@@ -61,7 +51,6 @@ objExcel.Quit
 
 MsgBox "Done! Files saved in: " & saveFolder, vbInformation
 
-' ---- FUNCTIONS ----
 Function CleanFileName(str)
     Dim badChars, ch
     badChars = Array("\", "/", ":", "*", "?", """", "<", ">", "|")
