@@ -1,0 +1,90 @@
+Option Explicit
+
+Dim objExcel, objFSO, csvFile, saveFolder
+Dim objWorkbook, objWorksheet
+Dim lastRow, appCol, dict, cell, appName, key
+Dim tempWB, tempWS
+
+' Create objects
+Set objExcel = CreateObject("Excel.Application")
+Set objFSO = CreateObject("Scripting.FileSystemObject")
+Set dict = CreateObject("Scripting.Dictionary")
+
+objExcel.Visible = False
+appCol = 2 ' Column number for Application
+
+' Ask for source CSV
+csvFile = BrowseForFile("Select CSV file to split")
+If csvFile = "" Then WScript.Quit
+
+' Ask for destination folder
+saveFolder = BrowseForFolder("Select folder to save output")
+If saveFolder = "" Then WScript.Quit
+
+' Open CSV
+Set objWorkbook = objExcel.Workbooks.Open(csvFile)
+Set objWorksheet = objWorkbook.Sheets(1)
+
+' Find last row in application column
+lastRow = objWorksheet.Cells(objWorksheet.Rows.Count, appCol).End(-4162).Row ' -4162 = xlUp
+
+' Get unique application names
+For Each cell In objWorksheet.Range(objWorksheet.Cells(2, appCol), objWorksheet.Cells(lastRow, appCol))
+    appName = Trim(cell.Value)
+    If Len(appName) > 0 Then
+        If Not dict.Exists(appName) Then dict.Add appName, True
+    End If
+Next
+
+' Loop and save each application
+objExcel.ScreenUpdating = False
+For Each key In dict.Keys
+    objWorksheet.UsedRange.AutoFilter Field:=appCol, Criteria1:=key
+    
+    Set tempWB = objExcel.Workbooks.Add
+    Set tempWS = tempWB.Sheets(1)
+    
+    objWorksheet.UsedRange.SpecialCells(12).Copy ' 12 = xlCellTypeVisible
+    tempWS.Range("A1").PasteSpecial -4163 ' -4163 = xlPasteValues
+    
+    tempWB.SaveAs saveFolder & "\" & CleanFileName(key) & ".csv", 6 ' 6 = xlCSV
+    tempWB.Close False
+Next
+
+objWorksheet.AutoFilterMode = False
+objWorkbook.Close False
+objExcel.Quit
+
+MsgBox "Done! Files saved in: " & saveFolder, vbInformation
+
+' ---- FUNCTIONS ----
+Function CleanFileName(str)
+    Dim badChars, ch
+    badChars = Array("\", "/", ":", "*", "?", """", "<", ">", "|")
+    For Each ch In badChars
+        str = Replace(str, ch, "_")
+    Next
+    CleanFileName = str
+End Function
+
+Function BrowseForFile(title)
+    Dim objDialog
+    Set objDialog = CreateObject("UserAccounts.CommonDialog")
+    objDialog.Filter = "CSV Files|*.csv"
+    objDialog.FilterIndex = 1
+    objDialog.InitialDir = objFSO.GetAbsolutePathName(".")
+    objDialog.Flags = &H80000
+    objDialog.ShowOpen
+    BrowseForFile = objDialog.FileName
+End Function
+
+Function BrowseForFolder(title)
+    Dim objShell, folder
+    Set objShell = CreateObject("Shell.Application")
+    Set folder = objShell.BrowseForFolder(0, title, 0, 0)
+    If TypeName(folder) = "Nothing" Then
+        BrowseForFolder = ""
+    Else
+        BrowseForFolder = folder.Self.Path
+    End If
+End Function
