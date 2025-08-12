@@ -1,4 +1,4 @@
-Option Explicit
+ Option Explicit
 
 Dim objExcel, objFSO, csvFile, saveFolder
 Dim objWorkbook, objWorksheet
@@ -13,9 +13,13 @@ Set dict = CreateObject("Scripting.Dictionary")
 objExcel.Visible = False
 appCol = 2 ' Column number for Application
 
-' Ask for source CSV
-csvFile = BrowseForFile("Select CSV file to split")
+' Ask for source CSV path
+csvFile = InputBox("Enter full path to CSV file:", "Source CSV")
 If csvFile = "" Then WScript.Quit
+If Not objFSO.FileExists(csvFile) Then
+    MsgBox "File not found: " & csvFile, vbCritical
+    WScript.Quit
+End If
 
 ' Ask for destination folder
 saveFolder = BrowseForFolder("Select folder to save output")
@@ -65,24 +69,6 @@ Function CleanFileName(str)
         str = Replace(str, ch, "_")
     Next
     CleanFileName = str
-End Function
-
-Function BrowseForFile(title)
-    Dim objShell, objFile
-    Set objShell = CreateObject("Shell.Application")
-    Set objFile = objShell.BrowseForFolder(0, title & " (Select folder containing the file)", 0, 0)
-    If TypeName(objFile) = "Nothing" Then
-        BrowseForFile = ""
-    Else
-        ' Let user manually type file name after selecting folder
-        Dim fileName
-        fileName = InputBox("Enter the CSV file name (with extension) in folder: " & objFile.Self.Path)
-        If fileName = "" Then
-            BrowseForFile = ""
-        Else
-            BrowseForFile = objFile.Self.Path & "\" & fileName
-        End If
-    End If
 End Function
 
 Function BrowseForFolder(title)
