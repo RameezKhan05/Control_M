@@ -1,0 +1,67 @@
+Add-Type -AssemblyName Microsoft.Office.Interop.Excel
+
+# Function: Show file picker
+function Get-File($title, $filter) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = $title
+    $dialog.Filter = $filter
+    if ($dialog.ShowDialog() -eq 'OK') { return $dialog.FileName } else { return "" }
+}
+
+# Function: Show folder picker
+function Get-Folder($description) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = $description
+    if ($dialog.ShowDialog() -eq 'OK') { return $dialog.SelectedPath } else { return "" }
+}
+
+# Ask for CSV file and destination folder
+$csvFile = Get-File "Select CSV file" "CSV Files (*.csv)|*.csv"
+if (-not $csvFile) { Write-Host "No file selected. Exiting."; exit }
+
+$saveFolder = Get-Folder "Select destination folder for split files"
+if (-not $saveFolder) { Write-Host "No folder selected. Exiting."; exit }
+
+# Create Excel COM object
+$excel = New-Object -ComObject Excel.Application
+$excel.Visible = $false
+
+# Open CSV
+$workbook = $excel.Workbooks.Open($csvFile)
+$worksheet = $workbook.Sheets.Item(1)
+
+$appCol = 2  # Application is in column 2
+$lastRow = $worksheet.Cells($worksheet.Rows.Count, $appCol).End(-4162).Row # -4162 = xlUp
+
+# Get unique application names
+$applications = @{}
+for ($row = 2; $row -le $lastRow; $row++) {
+    $appName = ($worksheet.Cells.Item($row, $appCol).Text).Trim()
+    if ($appName -ne "") { $applications[$appName] = $true }
+}
+
+# Loop through apps and save
+foreach ($key in $applications.Keys) {
+    $worksheet.UsedRange.AutoFilter($appCol, $key)
+
+    $tempWB = $excel.Workbooks.Add()
+    $worksheet.UsedRange.SpecialCells(12).Copy() # 12 = xlCellTypeVisible
+    $tempWB.Sheets.Item(1).Range("A1").PasteSpecial(-4163) # -4163 = xlPasteValues
+
+    $safeName = ($key -replace '[\\\/:\*\?"<>\|]', '_')
+    $tempWB.SaveAs((Join-Path $saveFolder "$safeName.csv"), 6) # 6 = xlCSV
+    $tempWB.Close($false)
+}
+
+# Cleanup
+$worksheet.AutoFilterMode = $false
+$workbook.Close($false)
+$excel.Quit()
+
+[System.Runtime.Interopservices.Marshal]::ReleaseComObject($worksheet) | Out-Null
+[System.Runtime.Interopservices.Marshal]::ReleaseComObject($workbook) | Out-Null
+[System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
+
+Write-Host "Done! Files saved in: $saveFolder"
