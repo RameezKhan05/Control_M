@@ -1,0 +1,28 @@
+import matplotlib.pyplot as plt
+import pandas as pd
+
+data = {
+    "Component": [
+        "HPOMI Monitoring", "Archiving & Purge Policies", "CFT Setup Review", "Database Audit Policies",
+        "CI/CD Pipeline Review", "Process Automation Review", "Repetitive Incidents Review", 
+        "WIKI & KEDB Review", "Vulnerability Review", "Certificate Renewal Review"
+    ],
+    "Automation": [40, 45, 25, 30, 160, 80, 40, 20, 30, 20],
+    "Monitoring": [80, 0, 0, 0, 0, 0, 60, 0, 0, 0],
+    "Compliance": [0, 15, 20, 10, 0, 0, 0, 5, 40, 15]
+}
+df = pd.DataFrame(data)
+df["Total"] = df["Automation"] + df["Monitoring"] + df["Compliance"]
+
+plt.figure(figsize=(10, 6))
+plt.bar(df["Component"], df["Automation"], label="Automation", width=0.6)
+plt.bar(df["Component"], df["Monitoring"], bottom=df["Automation"], label="Monitoring", width=0.6)
+plt.bar(df["Component"], df["Compliance"], bottom=df["Automation"] + df["Monitoring"], label="Compliance", width=0.6)
+
+plt.ylabel("Manual Effort Saved (Hours per Quarter)")
+plt.title("Operational Efficiency – Manual Effort Reduction through Automation")
+plt.xticks(rotation=45, ha='right')
+plt.legend()
+plt.tight_layout()
+plt.savefig("efficiency_chart.png", dpi=300)
+plt.show()
