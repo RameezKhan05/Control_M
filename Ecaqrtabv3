@@ -1,0 +1,106 @@
+#!/bin/bash
+
+############################################
+# CONFIGURATION
+############################################
+RESOURCE_FILE="resources.txt"
+RAW_FILE="/tmp/ecarqtab_raw_output.txt"
+HTML_FILE="/tmp/resource_report.html"
+
+MAIL_TO="ops-team@example.com"
+MAIL_FROM="controlm@yourdomain.com"
+SUBJECT="Control-M Quantitative Resource Status"
+
+############################################
+# PHASE 1: CREATE FLAT FILE (RAW OUTPUT)
+############################################
+
+> "$RAW_FILE"
+
+while read -r RESOURCE
+do
+  [ -z "$RESOURCE" ] && continue
+
+  echo "===== START RESOURCE: $RESOURCE =====" >> "$RAW_FILE"
+  ecarqtab -list "$RESOURCE" >> "$RAW_FILE" 2>&1
+  echo "===== END RESOURCE: $RESOURCE =====" >> "$RAW_FILE"
+  echo >> "$RAW_FILE"
+
+done < "$RESOURCE_FILE"
+
+############################################
+# PHASE 2: GENERATE HTML FROM FLAT FILE
+############################################
+
+cat <<EOF > "$HTML_FILE"
+<html>
+<head>
+<style>
+  body { font-family: Arial, sans-serif; }
+  table { border-collapse: collapse; width: 90%; }
+  th, td { border: 1px solid #999; padding: 6px; text-align: center; }
+  th { background-color: #f2f2f2; }
+  .zero { background-color: #ffcccc; }
+  .ok { background-color: #ccffcc; }
+</style>
+</head>
+<body>
+<h2>Control-M Quantitative Resource Status</h2>
+<table>
+<tr>
+  <th>Resource</th>
+  <th>Max-Avail</th>
+  <th>Reserved</th>
+  <th>Used</th>
+  <th>Free</th>
+</tr>
+EOF
+
+awk '
+/^===== START RESOURCE:/ { in_block=1; next }
+/^===== END RESOURCE:/   { in_block=0; next }
+
+in_block {
+  # Match the actual data line: resource + 4 numbers
+  if ($0 ~ /^[[:space:]]*[A-Z0-9_]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+/) {
+
+    gsub(/^[[:space:]]+/, "", $0)
+    split($0, a, /[[:space:]]+/)
+
+    resource=a[1]
+    max=a[2]
+    reserved=a[3]
+    used=a[4]
+    free=a[5]
+
+    class = (free == 0) ? "zero" : "ok"
+
+    printf "<tr class=\"%s\"><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n", \
+           class, resource, max, reserved, used, free
+  }
+}
+' "$RAW_FILE" >> "$HTML_FILE"
+
+cat <<EOF >> "$HTML_FILE"
+</table>
+</body>
+</html>
+EOF
+
+############################################
+# PHASE 3: SEND HTML MAIL
+############################################
+
+{
+  echo "From: $MAIL_FROM"
+  echo "To: $MAIL_TO"
+  echo "Subject: $SUBJECT"
+  echo "MIME-Version: 1.0"
+  echo "Content-Type: text/html"
+  echo
+  cat "$HTML_FILE"
+} | sendmail -t
+
+############################################
+# END
+############################################
