@@ -1,0 +1,76 @@
+#!/bin/bash
+
+INPUT_FILE="resources.txt"
+HTML_FILE="/tmp/resource_report.html"
+MAIL_TO="ops-team@example.com"
+MAIL_FROM="controlm@yourdomain.com"
+SUBJECT="Control-M Quantitative Resource Status"
+
+cat <<EOF > "$HTML_FILE"
+<html>
+<head>
+<style>
+  body { font-family: Arial, sans-serif; }
+  table { border-collapse: collapse; width: 80%; }
+  th, td { border: 1px solid #999; padding: 6px; text-align: center; }
+  th { background-color: #f2f2f2; }
+  .zero { background-color: #ffcccc; }
+  .ok { background-color: #ccffcc; }
+</style>
+</head>
+<body>
+<h2>Control-M Quantitative Resource Status</h2>
+<table>
+<tr>
+  <th>Resource</th>
+  <th>Max</th>
+  <th>Reserved</th>
+  <th>Used</th>
+  <th>Free</th>
+</tr>
+EOF
+
+while read -r RESOURCE
+do
+  [ -z "$RESOURCE" ] && continue
+
+  LINE=$(ecarqtab -list "$RESOURCE" 2>/dev/null | tail -1)
+
+  MAX=$(echo "$LINE" | awk '{print $2}')
+  RESERVED=$(echo "$LINE" | awk '{print $3}')
+  USED=$(echo "$LINE" | awk '{print $4}')
+  FREE=$(echo "$LINE" | awk '{print $5}')
+
+  if [ "$FREE" = "0" ]; then
+    CLASS="zero"
+  else
+    CLASS="ok"
+  fi
+
+  cat <<EOF >> "$HTML_FILE"
+<tr class="$CLASS">
+  <td>$RESOURCE</td>
+  <td>$MAX</td>
+  <td>$RESERVED</td>
+  <td>$USED</td>
+  <td>$FREE</td>
+</tr>
+EOF
+
+done < "$INPUT_FILE"
+
+cat <<EOF >> "$HTML_FILE"
+</table>
+</body>
+</html>
+EOF
+
+{
+  echo "From: $MAIL_FROM"
+  echo "To: $MAIL_TO"
+  echo "Subject: $SUBJECT"
+  echo "MIME-Version: 1.0"
+  echo "Content-Type: text/html"
+  echo
+  cat "$HTML_FILE"
+} | sendmail -t
