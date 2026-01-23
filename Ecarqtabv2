@@ -11,7 +11,7 @@ cat <<EOF > "$HTML_FILE"
 <head>
 <style>
   body { font-family: Arial, sans-serif; }
-  table { border-collapse: collapse; width: 80%; }
+  table { border-collapse: collapse; width: 90%; }
   th, td { border: 1px solid #999; padding: 6px; text-align: center; }
   th { background-color: #f2f2f2; }
   .zero { background-color: #ffcccc; }
@@ -23,7 +23,7 @@ cat <<EOF > "$HTML_FILE"
 <table>
 <tr>
   <th>Resource</th>
-  <th>Max</th>
+  <th>Max-Avail</th>
   <th>Reserved</th>
   <th>Used</th>
   <th>Free</th>
@@ -34,24 +34,47 @@ while read -r RESOURCE
 do
   [ -z "$RESOURCE" ] && continue
 
-  LINE=$(ecarqtab -list "$RESOURCE" 2>/dev/null | tail -1)
+  LINE=$(ecarqtab -list "$RESOURCE" | awk -v r="$RESOURCE" '
+    $0 ~ r {
+      name=substr($0,1,30)
+      max=substr($0,31,10)
+      res=substr($0,41,10)
+      used=substr($0,51,10)
+      free=substr($0,61,10)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", max)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", res)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", used)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", free)
+      print name "|" max "|" res "|" used "|" free
+      exit
+    }
+  ')
 
-  MAX=$(echo "$LINE" | awk '{print $2}')
-  RESERVED=$(echo "$LINE" | awk '{print $3}')
-  USED=$(echo "$LINE" | awk '{print $4}')
-  FREE=$(echo "$LINE" | awk '{print $5}')
-
-  if [ "$FREE" = "0" ]; then
-    CLASS="zero"
-  else
-    CLASS="ok"
+  if [ -z "$LINE" ]; then
+    cat <<EOF >> "$HTML_FILE"
+<tr class="zero">
+  <td>$RESOURCE</td>
+  <td colspan="4">NOT FOUND</td>
+</tr>
+EOF
+    continue
   fi
+
+  NAME=$(echo "$LINE" | cut -d'|' -f1)
+  MAX=$(echo "$LINE"  | cut -d'|' -f2)
+  RES=$(echo "$LINE"  | cut -d'|' -f3)
+  USED=$(echo "$LINE" | cut -d'|' -f4)
+  FREE=$(echo "$LINE" | cut -d'|' -f5)
+
+  CLASS="ok"
+  [ "$FREE" = "0" ] && CLASS="zero"
 
   cat <<EOF >> "$HTML_FILE"
 <tr class="$CLASS">
-  <td>$RESOURCE</td>
+  <td>$NAME</td>
   <td>$MAX</td>
-  <td>$RESERVED</td>
+  <td>$RES</td>
   <td>$USED</td>
   <td>$FREE</td>
 </tr>
