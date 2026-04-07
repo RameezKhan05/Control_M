@@ -1,0 +1,158 @@
+#!/bin/bash
+
+OUTPUT_DIR="/tmp/live_benchmark_$(date +%Y%m%d_%H%M%S)"
+REPORT="$OUTPUT_DIR/live_report.html"
+SAR_LOG="$OUTPUT_DIR/sar.log"
+
+NFS_MOUNT="/mnt/nfs"   # CHANGE THIS
+TEST_SIZE_GB=2
+PORT=5001
+
+# ===== EMAIL CONFIG =====
+EMAIL_TO="your_email@example.com"
+EMAIL_SUBJECT="Live Benchmark Report - $(hostname)"
+
+mkdir -p $OUTPUT_DIR
+
+# ===== SYSTEM INFO =====
+HOSTNAME=$(hostname)
+DATE=$(date)
+CPU=$(lscpu | grep "Model name" | awk -F: '{print $2}')
+CORES=$(nproc)
+MEM=$(free -h | grep Mem | awk '{print $2}')
+
+# ===== START SAR =====
+sar -u -r -d -n DEV 1 > $SAR_LOG &
+SAR_PID=$!
+
+# ===== CPU LOAD =====
+PIDS=()
+for i in $(seq 1 $CORES); do
+    yes > /dev/null &
+    PIDS+=($!)
+done
+
+sleep 10
+kill "${PIDS[@]}"
+
+# ===== MEMORY =====
+dd if=/dev/zero of=/dev/shm/mem_test bs=1M count=1024 &>/dev/null
+rm -f /dev/shm/mem_test
+
+# ===== DISK =====
+TEST_FILE="$OUTPUT_DIR/testfile"
+
+sync; echo 3 > /proc/sys/vm/drop_caches
+START=$(date +%s)
+dd if=/dev/zero of=$TEST_FILE bs=1G count=$TEST_SIZE_GB oflag=direct &>/dev/null
+END=$(date +%s)
+WRITE_MBPS=$((TEST_SIZE_GB * 1024 / (END-START)))
+
+sync; echo 3 > /proc/sys/vm/drop_caches
+START=$(date +%s)
+dd if=$TEST_FILE of=/dev/null bs=1G &>/dev/null
+END=$(date +%s)
+READ_MBPS=$((TEST_SIZE_GB * 1024 / (END-START)))
+
+# ===== NFS =====
+NFS_FILE="$NFS_MOUNT/testfile"
+
+START=$(date +%s)
+cp $TEST_FILE $NFS_FILE
+END=$(date +%s)
+NFS_WRITE_MBPS=$((TEST_SIZE_GB * 1024 / (END-START)))
+
+START=$(date +%s)
+cp $NFS_FILE ${TEST_FILE}_read
+END=$(date +%s)
+NFS_READ_MBPS=$((TEST_SIZE_GB * 1024 / (END-START)))
+
+# ===== NETWORK TEST (NC ONLY) =====
+NET_MBPS="N/A"
+NET_RESULT="Netcat (loopback)"
+
+nc -l $PORT > /dev/null &
+NC_PID=$!
+sleep 2
+
+START=$(date +%s)
+dd if=$TEST_FILE bs=1M 2>/dev/null | nc localhost $PORT
+END=$(date +%s)
+
+kill $NC_PID 2>/dev/null
+
+TIME_TAKEN=$((END - START))
+if [ $TIME_TAKEN -gt 0 ]; then
+    NET_MBPS=$((TEST_SIZE_GB * 1024 / TIME_TAKEN))
+fi
+
+# ===== CLEANUP =====
+rm -f $TEST_FILE ${TEST_FILE}_read $NFS_FILE
+
+# ===== STOP SAR =====
+kill $SAR_PID
+
+# ===== HTML REPORT =====
+cat <<EOF > $REPORT
+<html>
+<head>
+<style>
+body { font-family: Arial; }
+h1 { color: #2c3e50; }
+table { border-collapse: collapse; width: 60%; }
+th, td { border: 1px solid #ddd; padding: 8px; }
+th { background-color: #f2f2f2; }
+pre { background: #f4f4f4; padding: 10px; }
+</style>
+</head>
+
+<body>
+
+<h1>Live Benchmark Report</h1>
+
+<h2>System Info</h2>
+<table>
+<tr><th>Host</th><td>$HOSTNAME</td></tr>
+<tr><th>Date</th><td>$DATE</td></tr>
+<tr><th>CPU</th><td>$CPU</td></tr>
+<tr><th>Cores</th><td>$CORES</td></tr>
+<tr><th>Memory</th><td>$MEM</td></tr>
+</table>
+
+<h2>Disk Performance</h2>
+<table>
+<tr><th>Write</th><td>${WRITE_MBPS} MB/s</td></tr>
+<tr><th>Read</th><td>${READ_MBPS} MB/s</td></tr>
+</table>
+
+<h2>NFS Performance</h2>
+<table>
+<tr><th>Write</th><td>${NFS_WRITE_MBPS} MB/s</td></tr>
+<tr><th>Read</th><td>${NFS_READ_MBPS} MB/s</td></tr>
+</table>
+
+<h2>Network Performance</h2>
+<table>
+<tr><th>Method</th><td>$NET_RESULT</td></tr>
+<tr><th>Throughput</th><td>${NET_MBPS} MB/s</td></tr>
+<tr><th>Note</th><td>Loopback test</td></tr>
+</table>
+
+<h2>SAR Snapshot</h2>
+<pre>
+$(tail -n 100 $SAR_LOG)
+</pre>
+
+</body>
+</html>
+EOF
+
+echo "Report generated: $REPORT"
+
+# ===== SEND EMAIL =====
+if command -v mailx >/dev/null 2>&1; then
+    cat $REPORT | mailx -a "Content-Type: text/html" -s "$EMAIL_SUBJECT" $EMAIL_TO
+    echo "📧 Email sent to $EMAIL_TO"
+else
+    echo "⚠️ mailx not installed. Skipping email."
+fi
