@@ -1,0 +1,173 @@
+#!/bin/bash
+
+OUTPUT_DIR="/tmp/sar_analysis_$(date +%Y%m%d_%H%M%S)"
+REPORT="$OUTPUT_DIR/sar_report.html"
+TMP_TABLE="$OUTPUT_DIR/table_rows.html"
+SUMMARY="$OUTPUT_DIR/summary.txt"
+
+EMAIL_TO="your_email@example.com"
+EMAIL_SUBJECT="30-Day SAR Analysis Report - $(hostname)"
+
+mkdir -p $OUTPUT_DIR
+> $TMP_TABLE
+> $SUMMARY
+
+echo "Running 30-day SAR analysis..."
+
+for f in /var/log/sa/sa??; do
+    [ -f "$f" ] || continue
+
+    DAY=$(basename $f)
+
+    # ===== CPU PEAK =====
+    CPU_DATA=$(sar -u -f $f 2>/dev/null)
+
+    CPU_PEAK=$(echo "$CPU_DATA" | awk '
+    /all/ && $1 ~ /^[0-9]/ {
+        idle=$(NF)
+        usage=100-idle
+        if (usage>=0 && usage<=100) {
+            if (usage > max) max=usage
+        }
+    }
+    END {
+        if (max=="") print "N/A"; else printf "%.2f", max
+    }')
+
+    CPU_TIME=$(echo "$CPU_DATA" | awk '
+    /all/ && $1 ~ /^[0-9]/ {
+        idle=$(NF)
+        usage=100-idle
+        if (usage>=0 && usage<=100) {
+            if (usage > max) {
+                max=usage
+                time=$1
+            }
+        }
+    }
+    END { print time }')
+
+    # ===== DISK PEAK =====
+    DISK_DATA=$(sar -d -f $f 2>/dev/null)
+
+    DISK_AWAIT=$(echo "$DISK_DATA" | awk '
+    $1 ~ /^[0-9]/ {
+        await=$(NF-3)
+        if (await >= 0 && await < 10000) {
+            if (await > max) max=await
+        }
+    }
+    END {
+        if (max=="") print "N/A"; else printf "%.2f", max
+    }')
+
+    DISK_TIME=$(echo "$DISK_DATA" | awk '
+    $1 ~ /^[0-9]/ {
+        await=$(NF-3)
+        if (await >= 0 && await < 10000) {
+            if (await > max) {
+                max=await
+                time=$1
+            }
+        }
+    }
+    END { print time }')
+
+    # ===== NETWORK PEAK =====
+    NET_DATA=$(sar -n DEV -f $f 2>/dev/null)
+
+    NET_TOTAL=$(echo "$NET_DATA" | awk '
+    $1 ~ /^[0-9]/ && $5 ~ /^[0-9.]+$/ {
+        total=$5+$6
+        if (total > max) max=total
+    }
+    END {
+        if (max=="") print "N/A"; else printf "%.2f", max
+    }')
+
+    NET_TIME=$(echo "$NET_DATA" | awk '
+    $1 ~ /^[0-9]/ && $5 ~ /^[0-9.]+$/ {
+        total=$5+$6
+        if (total > max) {
+            max=total
+            time=$1
+        }
+    }
+    END { print time }')
+
+    # ===== BOTTLENECK LOGIC =====
+    BOTTLENECK="CPU"
+    SCORE=$CPU_PEAK
+
+    if [[ "$DISK_AWAIT" != "N/A" ]] && (( $(echo "$DISK_AWAIT > $SCORE" | bc -l) )); then
+        BOTTLENECK="DISK"
+        SCORE=$DISK_AWAIT
+    fi
+
+    if [[ "$NET_TOTAL" != "N/A" ]] && (( $(echo "$NET_TOTAL > $SCORE" | bc -l) )); then
+        BOTTLENECK="NETWORK"
+        SCORE=$NET_TOTAL
+    fi
+
+    # ===== HTML ROW =====
+    echo "<tr>
+    <td>$DAY</td>
+    <td>$CPU_TIME (${CPU_PEAK}%)</td>
+    <td>$DISK_TIME (${DISK_AWAIT} ms)</td>
+    <td>$NET_TIME (${NET_TOTAL} KB/s)</td>
+    <td><b>$BOTTLENECK</b></td>
+    </tr>" >> $TMP_TABLE
+
+    echo "$DAY $BOTTLENECK $SCORE" >> $SUMMARY
+done
+
+# ===== TOP 5 =====
+TOP5=$(sort -k3 -nr $SUMMARY | head -5)
+
+# ===== HTML REPORT =====
+cat <<EOF > $REPORT
+<html>
+<head>
+<style>
+body { font-family: Arial; }
+h1 { color: #2c3e50; }
+table { border-collapse: collapse; width: 80%; }
+th, td { border: 1px solid #ddd; padding: 8px; text-align:center; }
+th { background-color: #f2f2f2; }
+</style>
+</head>
+
+<body>
+
+<h1>30-Day SAR Analysis Report</h1>
+
+<h2>Daily Peak Summary</h2>
+<table>
+<tr>
+<th>Day</th>
+<th>CPU Peak</th>
+<th>Disk Peak</th>
+<th>Network Peak</th>
+<th>Bottleneck</th>
+</tr>
+$(cat $TMP_TABLE)
+</table>
+
+<h2>Top 5 Worst Days</h2>
+<pre>
+$TOP5
+</pre>
+
+</body>
+</html>
+EOF
+
+echo "Report generated: $REPORT"
+
+# ===== EMAIL =====
+if command -v mailx >/dev/null 2>&1; then
+    cat $REPORT | mailx -a "Content-Type: text/html" -s "$EMAIL_SUBJECT" $EMAIL_TO
+    echo "📧 Email sent to $EMAIL_TO"
+else
+    echo "⚠️ mailx not installed"
+fi
