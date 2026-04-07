@@ -1,0 +1,221 @@
+#!/bin/bash
+
+OUTPUT_DIR="/tmp/sar_analysis_$(date +%Y%m%d_%H%M%S)"
+REPORT="$OUTPUT_DIR/sar_report.html"
+TMP_TABLE="$OUTPUT_DIR/table_rows.html"
+SUMMARY_FILE="$OUTPUT_DIR/summary.txt"
+
+EMAIL_TO="your_email@example.com"
+EMAIL_SUBJECT="30-Day SAR Analysis Report - $(hostname)"
+
+mkdir -p $OUTPUT_DIR
+> $TMP_TABLE
+> $SUMMARY_FILE
+
+echo "Running 30-day SAR analysis..."
+
+for f in /var/log/sa/sa??; do
+    [ -f "$f" ] || continue
+    DAY=$(basename $f)
+
+    # ===== CPU =====
+    CPU_DATA=$(sar -u -f $f 2>/dev/null)
+
+    CPU_PEAK=$(echo "$CPU_DATA" | awk '
+    /all/ && $1 ~ /^[0-9]/ {
+        idle=$(NF)
+        usage=100-idle
+        if (usage>=0 && usage<=100) {
+            if (usage > max) max=usage
+        }
+    }
+    END { if (max=="") print "N/A"; else printf "%.2f", max }')
+
+    CPU_TIME=$(echo "$CPU_DATA" | awk '
+    /all/ && $1 ~ /^[0-9]/ {
+        idle=$(NF)
+        usage=100-idle
+        if (usage>=0 && usage<=100) {
+            if (usage > max) { max=usage; time=$1 }
+        }
+    }
+    END { print time }')
+
+    # ===== DISK =====
+    DISK_DATA=$(sar -d -f $f 2>/dev/null)
+
+    DISK_AWAIT=$(echo "$DISK_DATA" | awk '
+    $1 ~ /^[0-9]/ {
+        await=$(NF-3)
+        if (await >= 0 && await < 10000) {
+            if (await > max) max=await
+        }
+    }
+    END { if (max=="") print "N/A"; else printf "%.2f", max }')
+
+    DISK_TIME=$(echo "$DISK_DATA" | awk '
+    $1 ~ /^[0-9]/ {
+        await=$(NF-3)
+        if (await >= 0 && await < 10000) {
+            if (await > max) { max=await; time=$1 }
+        }
+    }
+    END { print time }')
+
+    # ===== MEMORY (dynamic column detection) =====
+    MEM_DATA=$(sar -r -f $f 2>/dev/null)
+
+    MEM_COL=$(echo "$MEM_DATA" | awk '
+    /%memused/ {
+        for (i=1; i<=NF; i++) {
+            if ($i ~ /%memused/) {
+                print i
+                exit
+            }
+        }
+    }')
+
+    MEM_USED=$(echo "$MEM_DATA" | awk -v col="$MEM_COL" '
+    $1 ~ /^[0-9]/ && col != "" {
+        used = $col
+        if (used ~ /^[0-9.]+$/ && used >= 0 && used <= 100) {
+            if (used > max) max = used
+        }
+    }
+    END { if (max=="") print "N/A"; else printf "%.2f", max }')
+
+    MEM_TIME=$(echo "$MEM_DATA" | awk -v col="$MEM_COL" '
+    $1 ~ /^[0-9]/ && col != "" {
+        used = $col
+        if (used ~ /^[0-9.]+$/ && used >= 0 && used <= 100) {
+            if (used > max) { max = used; time = $1 }
+        }
+    }
+    END { print time }')
+
+    # ===== NETWORK (INFO ONLY) =====
+    NET_DATA=$(sar -n DEV -f $f 2>/dev/null)
+
+    NET_TOTAL=$(echo "$NET_DATA" | awk '
+    $1 ~ /^[0-9]/ && $5 ~ /^[0-9.]+$/ {
+        total=$5+$6
+        if (total > max) max=total
+    }
+    END { if (max=="") print "N/A"; else printf "%.2f", max }')
+
+    NET_TIME=$(echo "$NET_DATA" | awk '
+    $1 ~ /^[0-9]/ && $5 ~ /^[0-9.]+$/ {
+        total=$5+$6
+        if (total > max) { max=total; time=$1 }
+    }
+    END { print time }')
+
+    # ===== BOTTLENECK LOGIC =====
+    BOTTLENECK="HEALTHY"
+
+    if [[ "$DISK_AWAIT" != "N/A" ]] && (( $(echo "$DISK_AWAIT > 20" | bc -l) )); then
+        BOTTLENECK="DISK"
+
+    elif [[ "$MEM_USED" != "N/A" ]] && (( $(echo "$MEM_USED > 90" | bc -l) )); then
+        BOTTLENECK="MEMORY"
+
+    elif [[ "$CPU_PEAK" != "N/A" ]] && (( $(echo "$CPU_PEAK > 85" | bc -l) )); then
+        BOTTLENECK="CPU"
+    fi
+
+    # ===== SCORING =====
+    SCORE=0
+    if [ "$BOTTLENECK" = "DISK" ]; then
+        SCORE=$DISK_AWAIT
+    elif [ "$BOTTLENECK" = "MEMORY" ]; then
+        SCORE=$MEM_USED
+    elif [ "$BOTTLENECK" = "CPU" ]; then
+        SCORE=$CPU_PEAK
+    fi
+
+    echo "$DAY $BOTTLENECK $SCORE" >> $SUMMARY_FILE
+
+    # ===== HTML ROW =====
+    echo "<tr>
+    <td>$DAY</td>
+    <td>$CPU_TIME (${CPU_PEAK}%)</td>
+    <td>$DISK_TIME (${DISK_AWAIT} ms)</td>
+    <td>$MEM_TIME (${MEM_USED}%)</td>
+    <td>$NET_TIME (${NET_TOTAL} KB/s)</td>
+    <td><b>$BOTTLENECK</b></td>
+    </tr>" >> $TMP_TABLE
+
+done
+
+# ===== SUMMARY =====
+TOP5=$(sort -k3 -nr $SUMMARY_FILE | head -5)
+
+DISK_COUNT=$(grep -c "DISK" $SUMMARY_FILE)
+MEM_COUNT=$(grep -c "MEMORY" $SUMMARY_FILE)
+CPU_COUNT=$(grep -c "CPU" $SUMMARY_FILE)
+HEALTHY_COUNT=$(grep -c "HEALTHY" $SUMMARY_FILE)
+
+# ===== HTML REPORT =====
+cat <<EOF > $REPORT
+<html>
+<head>
+<style>
+body { font-family: Arial; }
+h1 { color: #2c3e50; }
+table { border-collapse: collapse; width: 90%; }
+th, td { border: 1px solid #ddd; padding: 8px; text-align:center; }
+th { background-color: #f2f2f2; }
+</style>
+</head>
+
+<body>
+
+<h1>30-Day SAR Analysis Report</h1>
+
+<h2>Daily Peak Summary</h2>
+<table>
+<tr>
+<th>Day</th>
+<th>CPU Peak</th>
+<th>Disk Peak</th>
+<th>Memory Peak</th>
+<th>Network Peak</th>
+<th>Bottleneck</th>
+</tr>
+$(cat $TMP_TABLE)
+</table>
+
+<h2>Top 5 Worst Days</h2>
+<pre>
+$TOP5
+</pre>
+
+<h2>Bottleneck Summary</h2>
+<table>
+<tr><th>Resource</th><th>Days Impacted</th></tr>
+<tr><td>Disk</td><td>$DISK_COUNT</td></tr>
+<tr><td>Memory</td><td>$MEM_COUNT</td></tr>
+<tr><td>CPU</td><td>$CPU_COUNT</td></tr>
+<tr><td>Healthy</td><td>$HEALTHY_COUNT</td></tr>
+</table>
+
+<h3>Thresholds Used:</h3>
+<ul>
+<li>Disk Bottleneck: await > 20 ms</li>
+<li>Memory Bottleneck: > 90%</li>
+<li>CPU Bottleneck: > 85%</li>
+</ul>
+
+</body>
+</html>
+EOF
+
+echo "Report generated: $REPORT"
+
+# ===== EMAIL =====
+if command -v mailx >/dev/null 2>&1; then
+    cat $REPORT | mailx -a "Content-Type: text/html" -s "$EMAIL_SUBJECT" $EMAIL_TO
+    echo "📧 Email sent to $EMAIL_TO"
+else
+    echo "⚠️ mailx not installed"
+fi
