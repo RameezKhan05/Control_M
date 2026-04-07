@@ -1,0 +1,36 @@
+# ===== MEMORY =====
+MEM_DATA=$(sar -r -f $f 2>/dev/null)
+
+# Detect column number for %memused
+MEM_COL=$(echo "$MEM_DATA" | awk '
+/%memused/ {
+    for (i=1; i<=NF; i++) {
+        if ($i ~ /%memused/) {
+            print i
+            exit
+        }
+    }
+}')
+
+MEM_USED=$(echo "$MEM_DATA" | awk -v col="$MEM_COL" '
+$1 ~ /^[0-9]/ && col != "" {
+    used = $col
+    if (used ~ /^[0-9.]+$/ && used >= 0 && used <= 100) {
+        if (used > max) max = used
+    }
+}
+END {
+    if (max=="") print "N/A"; else printf "%.2f", max
+}')
+
+MEM_TIME=$(echo "$MEM_DATA" | awk -v col="$MEM_COL" '
+$1 ~ /^[0-9]/ && col != "" {
+    used = $col
+    if (used ~ /^[0-9.]+$/ && used >= 0 && used <= 100) {
+        if (used > max) {
+            max = used
+            time = $1
+        }
+    }
+}
+END { print time }')
