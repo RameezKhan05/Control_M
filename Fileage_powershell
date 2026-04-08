@@ -1,0 +1,69 @@
+# ==========================
+# CONFIGURATION
+# ==========================
+$filesToCheck = @(
+    "\\sharedpath\folder\file1.txt",
+    "\\sharedpath\folder\file2.txt"
+)
+
+$daysThreshold = 7
+
+# Email settings
+$smtpServer = "smtp.yourcompany.com"
+$from = "alert@yourcompany.com"
+$to = "dl1@yourcompany.com","dl2@yourcompany.com"
+$subject = "ALERT: File(s) Not Updated in Last $daysThreshold Days"
+
+# ==========================
+# LOGIC
+# ==========================
+$today = Get-Date
+$staleFiles = @()
+
+foreach ($file in $filesToCheck) {
+    if (Test-Path $file) {
+        $lastModified = (Get-Item $file).LastWriteTime
+        $daysOld = ($today - $lastModified).Days
+
+        if ($daysOld -gt $daysThreshold) {
+            $staleFiles += [PSCustomObject]@{
+                FilePath = $file
+                LastModified = $lastModified
+                DaysOld = $daysOld
+            }
+        }
+    } else {
+        $staleFiles += [PSCustomObject]@{
+            FilePath = $file
+            LastModified = "File Not Found"
+            DaysOld = "N/A"
+        }
+    }
+}
+
+# ==========================
+# SEND EMAIL IF NEEDED
+# ==========================
+if ($staleFiles.Count -gt 0) {
+
+    $body = "The following file(s) are older than $daysThreshold days or missing:`n`n"
+
+    foreach ($file in $staleFiles) {
+        $body += "File: $($file.FilePath)`n"
+        $body += "Last Modified: $($file.LastModified)`n"
+        $body += "Days Old: $($file.DaysOld)`n"
+        $body += "-----------------------------`n"
+    }
+
+    Send-MailMessage `
+        -SmtpServer $smtpServer `
+        -From $from `
+        -To $to `
+        -Subject $subject `
+        -Body $body
+
+    Write-Output "Alert email sent."
+}
+else {
+    Write-Output "All files are within threshold."
+}
