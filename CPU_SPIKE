@@ -1,0 +1,232 @@
+<#
+==============================================================
+ CPU SPIKE ANALYZER (PowerShell)
+
+ Reads a CSV of server monitoring data, finds minutes where
+ total CPU exceeded a threshold you enter, expands each hit by
+ N minutes of context before/after (merging overlaps into one
+ spike event), and saves the results next to the input CSV:
+
+   <name>_spike_summary.csv  - one row per spike event
+   <name>_spike_detail.csv   - minute-by-minute rows inside
+                               each spike window (the
+                               "filtered data")
+
+ Expected CSV columns BY POSITION (header names don't matter):
+   1st = date & time
+   2nd = process id
+   3rd = process name
+   4th = CPU usage  (230 means 2.3 cores)
+
+ Run:  right-click > Run with PowerShell, or from a prompt:
+       powershell -ExecutionPolicy Bypass -File .\CPU_Spike_Analyzer.ps1
+==============================================================
+#>
+
+# ---------------- User inputs ----------------
+$csvPath = Read-Host "Enter full path to the CSV file"
+$csvPath = $csvPath.Trim('"').Trim()
+
+if (-not (Test-Path -LiteralPath $csvPath)) {
+    Write-Host "File not found: $csvPath" -ForegroundColor Red
+    exit 1
+}
+
+$thresholdInput = Read-Host "Enter peak CPU threshold (e.g. 300 for 4 cores, 400 for 8 cores)"
+$threshold = 0.0
+if (-not [double]::TryParse($thresholdInput, [ref]$threshold)) {
+    Write-Host "Invalid number: $thresholdInput" -ForegroundColor Red
+    exit 1
+}
+
+$ctxInput = Read-Host "Minutes of context before/after each spike [default 10]"
+$contextMin = 10
+if ($ctxInput -and -not [int]::TryParse($ctxInput, [ref]$contextMin)) {
+    Write-Host "Invalid number, using 10." -ForegroundColor Yellow
+    $contextMin = 10
+}
+
+$topN = 5   # top processes reported per spike event
+
+# ---------------- Load CSV ----------------
+Write-Host "`nReading $csvPath ..." -ForegroundColor Cyan
+$rows = Import-Csv -LiteralPath $csvPath
+if (-not $rows -or $rows.Count -eq 0) {
+    Write-Host "CSV is empty." -ForegroundColor Red
+    exit 1
+}
+
+# Use the first four columns by position, whatever they're named
+$headers   = $rows[0].PSObject.Properties.Name
+if ($headers.Count -lt 4) {
+    Write-Host "CSV must have at least 4 columns (datetime, pid, process name, cpu)." -ForegroundColor Red
+    exit 1
+}
+$colTime = $headers[0]; $colPid = $headers[1]; $colName = $headers[2]; $colCpu = $headers[3]
+Write-Host ("Using columns -> time: '{0}', pid: '{1}', process: '{2}', cpu: '{3}'" -f $colTime,$colPid,$colName,$colCpu)
+
+# ---------------- Aggregate per minute ----------------
+# minTotal[minute]   = total CPU that minute
+# minProcs[minute]   = hashtable processName -> CPU sum
+# minCount[minute]   = active process row count
+$minTotal = @{}
+$minProcs = @{}
+$minCount = @{}
+
+$badDates = 0
+foreach ($row in $rows) {
+    $dtRaw = $row.$colTime
+    $dt = [datetime]::MinValue
+    if (-not [datetime]::TryParse($dtRaw, [ref]$dt)) { $badDates++; continue }
+
+    # truncate to the minute
+    $minute = $dt.Date.AddMinutes([int]($dt.Hour * 60 + $dt.Minute))
+
+    $cpu = 0.0
+    [void][double]::TryParse($row.$colCpu, [ref]$cpu)
+
+    $pName = "$($row.$colName)".Trim()
+    if (-not $pName) { $pName = "PID $($row.$colPid)" }
+
+    if (-not $minTotal.ContainsKey($minute)) {
+        $minTotal[$minute] = 0.0
+        $minCount[$minute] = 0
+        $minProcs[$minute] = @{}
+    }
+    $minTotal[$minute] += $cpu
+    $minCount[$minute] += 1
+
+    $pd = $minProcs[$minute]
+    if ($pd.ContainsKey($pName)) { $pd[$pName] += $cpu } else { $pd[$pName] = $cpu }
+}
+
+if ($badDates -gt 0) { Write-Host "Skipped $badDates row(s) with unreadable dates." -ForegroundColor Yellow }
+if ($minTotal.Count -eq 0) {
+    Write-Host "No valid data rows found." -ForegroundColor Red
+    exit 1
+}
+
+$minutes = $minTotal.Keys | Sort-Object
+$minutes = @($minutes)
+$n = $minutes.Count
+Write-Host ("Aggregated {0} rows into {1} distinct minutes." -f $rows.Count, $n)
+
+# ---------------- Find triggers, expand, merge ----------------
+$inWindow = New-Object bool[] $n
+$triggerCount = 0
+$ctxSpan = [timespan]::FromMinutes($contextMin)
+
+for ($i = 0; $i -lt $n; $i++) {
+    if ($minTotal[$minutes[$i]] -gt $threshold) {
+        $triggerCount++
+        # expand backward
+        for ($j = $i; $j -ge 0; $j--) {
+            if (($minutes[$i] - $minutes[$j]) -gt $ctxSpan) { break }
+            $inWindow[$j] = $true
+        }
+        # expand forward
+        for ($j = $i; $j -lt $n; $j++) {
+            if (($minutes[$j] - $minutes[$i]) -gt $ctxSpan) { break }
+            $inWindow[$j] = $true
+        }
+    }
+}
+
+$baseDir  = Split-Path -LiteralPath (Resolve-Path -LiteralPath $csvPath) -Parent
+$baseName = [System.IO.Path]::GetFileNameWithoutExtension($csvPath)
+$summaryPath = Join-Path $baseDir "$baseName`_spike_summary.csv"
+$detailPath  = Join-Path $baseDir "$baseName`_spike_detail.csv"
+
+if ($triggerCount -eq 0) {
+    Write-Host "`nTotal CPU never exceeded $threshold. Nothing to save." -ForegroundColor Green
+    exit 0
+}
+
+# ---------------- Walk merged windows and build output ----------------
+$summary = New-Object System.Collections.Generic.List[object]
+$detail  = New-Object System.Collections.Generic.List[object]
+$eventId = 0
+$wStart = -1
+
+function Write-SpikeEvent {
+    param([int]$iStart, [int]$iEnd)
+
+    $script:eventId++
+    $id = $script:eventId
+    $durMin = $iEnd - $iStart + 1
+
+    $peak = -1.0; $peakAt = $null; $sum = 0.0; $over = 0
+    $agg = @{}   # process -> @{Sum=..; Peak=..}
+
+    for ($i = $iStart; $i -le $iEnd; $i++) {
+        $m = $minutes[$i]
+        $tot = $minTotal[$m]
+        $sum += $tot
+        if ($tot -gt $peak) { $peak = $tot; $peakAt = $m }
+        if ($tot -gt $threshold) { $over++ }
+
+        # top process this minute + window aggregation
+        $bestName = ""; $bestVal = -1.0
+        foreach ($kv in $minProcs[$m].GetEnumerator()) {
+            if ($kv.Value -gt $bestVal) { $bestVal = $kv.Value; $bestName = $kv.Key }
+            if ($agg.ContainsKey($kv.Key)) {
+                $agg[$kv.Key].Sum += $kv.Value
+                if ($kv.Value -gt $agg[$kv.Key].Peak) { $agg[$kv.Key].Peak = $kv.Value }
+            } else {
+                $agg[$kv.Key] = @{ Sum = $kv.Value; Peak = $kv.Value }
+            }
+        }
+
+        $detail.Add([pscustomobject]@{
+            SpikeEvent       = $id
+            Minute           = $m.ToString("yyyy-MM-dd HH:mm")
+            TotalCPU         = [math]::Round($tot, 1)
+            AboveThreshold   = if ($tot -gt $threshold) { "YES" } else { "" }
+            ActiveProcesses  = $minCount[$m]
+            TopProcess       = $bestName
+            TopProcessCPU    = [math]::Round($bestVal, 1)
+        })
+    }
+
+    $top = $agg.GetEnumerator() |
+           Sort-Object { $_.Value.Peak } -Descending |
+           Select-Object -First $topN
+    $topText = ($top | ForEach-Object {
+        "{0} (peak {1}, avg {2})" -f $_.Key, [math]::Round($_.Value.Peak,1), [math]::Round($_.Value.Sum / $durMin,1)
+    }) -join "; "
+
+    $summary.Add([pscustomobject]@{
+        SpikeEvent           = $id
+        WindowStart          = $minutes[$iStart].ToString("yyyy-MM-dd HH:mm")
+        WindowEnd            = $minutes[$iEnd].ToString("yyyy-MM-dd HH:mm")
+        WindowMinutes        = $durMin
+        MinutesAboveThreshold = $over
+        PeakTotalCPU         = [math]::Round($peak, 1)
+        PeakAt               = $peakAt.ToString("yyyy-MM-dd HH:mm")
+        AvgTotalCPU          = [math]::Round($sum / $durMin, 1)
+        TopProcesses         = $topText
+    })
+}
+
+for ($i = 0; $i -lt $n; $i++) {
+    if ($inWindow[$i]) {
+        if ($wStart -eq -1) { $wStart = $i }
+    } elseif ($wStart -ge 0) {
+        Write-SpikeEvent -iStart $wStart -iEnd ($i - 1)
+        $wStart = -1
+    }
+}
+if ($wStart -ge 0) { Write-SpikeEvent -iStart $wStart -iEnd ($n - 1) }
+
+# ---------------- Save next to the input CSV ----------------
+$summary | Export-Csv -LiteralPath $summaryPath -NoTypeInformation -Encoding UTF8
+$detail  | Export-Csv -LiteralPath $detailPath  -NoTypeInformation -Encoding UTF8
+
+Write-Host ""
+Write-Host ("Found {0} spike event(s) from {1} trigger minute(s) above {2}." -f $eventId, $triggerCount, $threshold) -ForegroundColor Green
+Write-Host "Saved:" -ForegroundColor Green
+Write-Host "  $summaryPath"
+Write-Host "  $detailPath"
+
+# quick on-screen preview of the summary
+$summary | Format-Table SpikeEvent, WindowStart, WindowEnd, WindowMinutes, MinutesAboveThreshold, PeakTotalCPU, AvgTotalCPU -AutoSize
